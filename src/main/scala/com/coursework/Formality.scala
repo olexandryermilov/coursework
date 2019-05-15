@@ -1,5 +1,7 @@
 package com.coursework
 
+import java.io.FileWriter
+
 import eu.crydee.syllablecounter.SyllableCounter
 import org.apache.spark.SparkConf
 import org.apache.spark.ml.evaluation.RegressionEvaluator
@@ -7,6 +9,7 @@ import org.apache.spark.ml.feature._
 import org.apache.spark.ml.regression.{LinearRegression, LinearRegressionModel}
 import org.apache.spark.sql.expressions.UserDefinedFunction
 import org.apache.spark.sql.functions._
+import org.apache.spark.sql.types._
 import org.apache.spark.sql.{DataFrame, SparkSession}
 
 import scala.io.Source
@@ -34,6 +37,9 @@ object Columns {
   final val digits = "digits"
   final val averageWordLength = "average_word_length"
   final val hedges = "hedges"
+  final val firstPerson = "first_person"
+  final val thirdPerson = "third_person"
+  final val filler = "fillers"
   final val all = Array(
     textLength,
     wordsCount,
@@ -45,9 +51,9 @@ object Columns {
     //automatedReadabilityIndex
     smog
     , GunningFog
-    , TFIDF
+    //, TFIDF
     //,ColemanLiau
-    , word2VecCol
+    //, word2VecCol
     , exclamation
     , question
     , ellipsis
@@ -56,6 +62,9 @@ object Columns {
     //, averageWordLength
     //, digits
     , hedges
+    //, firstPerson
+    , thirdPerson
+    //, filler
   )
 }
 
@@ -65,10 +74,16 @@ object Formality extends App {
   import Columns._
 
   var hedgeWords: Set[String] = Set()
+  var fillers: Set[String] = Set()
 
   def loadHedges(filePath: String) = {
     hedgeWords = Set()
     Source.fromFile(filePath).getLines().foreach(hedgeWords += _)
+  }
+
+  def loadFillers(filePath: String) = {
+    fillers = Set()
+    Source.fromFile(filePath).getLines().foreach(fillers += _)
   }
 
   def addLengthOfText(df: DataFrame) = {
@@ -98,10 +113,10 @@ object Formality extends App {
   def countOccurences(s: String, subs: String): Int = {
     var i = 0
     while (i + subs.length - 1 < s.length) {
-      if(s.substring(i, i + subs.length) == subs){
-        return countOccurences(s.substring(i+subs.length), subs) + 1
+      if (s.substring(i, i + subs.length) == subs && (i == 0 || s(i - 1) == ' ') && (i + subs.length == s.length || s(i + subs.length) == ' ')) {
+        return countOccurences(s.substring(i + subs.length), subs) + 1
       }
-      i+=1
+      i += 1
     }
     0
   }
@@ -110,8 +125,23 @@ object Formality extends App {
     val hedgeCounter = udf {
       x: String => hedgeWords.map(countOccurences(x, _)).sum
     }
+
+    val firstPersonCount = udf {
+      x: String => x.split(" ").map(_.toLowerCase).count(p => p == "i" || p == "me" || p == "we")
+    }
+
+    val thirdPersonCount = udf {
+      x: String => x.split(" ").map(_.toLowerCase).count(p => p == "he" || p == "she" || p == "him" || p == "her" || p == "they" || p == "them")
+    }
+
+    val fillersCount = udf {
+      x: String => fillers.map(countOccurences(x, _)).sum
+    }
     df
       .withColumn(hedges, hedgeCounter(df(text)))
+      .withColumn(firstPerson, firstPersonCount(df(text)))
+      .withColumn(thirdPerson, thirdPersonCount(df(text)))
+      .withColumn(filler, fillersCount(df(text)))
   }
 
   def punctuation(df: DataFrame): DataFrame = {
@@ -293,23 +323,29 @@ object Formality extends App {
     dataframe = countContraction(dataframe)
     dataframe = addWordsCount(dataframe)
     dataframe = addCaseFeatures(dataframe)
-    dataframe = meanWord2Vec(dataframe)
+    //dataframe = meanWord2Vec(dataframe)
     dataframe = readabilityMetrics(dataframe)
-    dataframe = addTFIDF(dataframe)
+    //dataframe = addTFIDF(dataframe)
     dataframe = punctuation(dataframe)
     dataframe = lexical(dataframe)
     dataframe = subjectivity(dataframe)
     dataframe
   }
 
-  def readAndCleanDataset(spark: SparkSession): DataFrame = {
-    var df = spark.read.format("csv").option("delimiter", "\t").load("src/main/resources/answers")
+  def readAndCleanDataset(dataFrame: DataFrame): DataFrame = {
+    var df = dataFrame
     df = dropNotUsedColumns(df)
     df = extractFeatures(df)
     df = setFeatures(df)
-    df = convertFormality(df)
-    df.show(29)
+    //df.show(29)
     df
+  }
+
+  def trainModel(df: DataFrame):LinearRegressionModel = {
+    val lr = new LinearRegression() setMaxIter 2000
+    val Array(train, test) = df.randomSplit(Array(0.8, 0.2), 42)
+    val lrModel: LinearRegressionModel = lr.fit(train)
+    lrModel
   }
 
   def predict(df: DataFrame): Unit = {
@@ -319,15 +355,37 @@ object Formality extends App {
     println(lrModel.coefficients.toArray.zip(all).mkString("\n"))
     val lrPredictions = lrModel.transform(test)
     val r2Evaluator = new RegressionEvaluator().setMetricName("r2")
-    println(r2Evaluator.evaluate(lrPredictions))
+    println(r2Evaluator.evaluate(lrPredictions) * 100)
+  }
+
+  case class Text(_c3: String)
+
+  def transformText(str: String, spark: SparkSession) = {
+    import spark.implicits._
+    val schema = new StructType(Array[StructField](new StructField("_c3", new ArrayType(DataTypes.StringType, true), false, Metadata.empty)))
+    val fw = new FileWriter("_с3")
+    fw.write(text)
+    fw.flush()
+    fw.close()
+    spark.sparkContext.textFile(text).map(Text).toDF("_c3")
+  }
+
+  def predict(text: String, linearRegressionModel: LinearRegressionModel, sparkSession: SparkSession) = {
+    var df = transformText(text, sparkSession)
+    df = readAndCleanDataset(df)
+    val res = linearRegressionModel.transform(df)
+    res.select("prediction").head().get(0)
   }
 
   override def main(args: Array[String]): Unit = {
     val conf = new SparkConf().setAppName(s"Formality").setMaster("local[*]").set("spark.executor.memory", "2g")
-    val spark = SparkSession.builder().config(conf).getOrCreate()
+    val spark: SparkSession = SparkSession.builder().config(conf).getOrCreate()
     loadHedges("src/main/resources/hedge")
-    val df = readAndCleanDataset(spark)
+    loadFillers("src/main/resources/fillers")
+    val df =convertFormality(readAndCleanDataset(spark.read.format("csv").option("delimiter", "\t").load("src/main/resources/answers")))
     predict(df)
+    val model = trainModel(df)
+    println(predict("I am the one who knocks", model, spark))
   }
 
 }
