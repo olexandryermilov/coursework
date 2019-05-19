@@ -1,7 +1,13 @@
 package com.coursework
 
 import java.io.FileWriter
+import java.util.Properties
 
+import ch.qos.logback.classic.{Level, Logger}
+import com.johnsnowlabs.nlp.annotator.{NerDLModel, PerceptronApproach}
+import com.johnsnowlabs.nlp.annotators.common.{IndexedToken, TokenizedSentence}
+import com.johnsnowlabs.nlp.pretrained.PretrainedPipeline
+import edu.stanford.nlp.pipeline.StanfordCoreNLP
 import eu.crydee.syllablecounter.SyllableCounter
 import org.apache.spark.SparkConf
 import org.apache.spark.ml.evaluation.RegressionEvaluator
@@ -11,6 +17,7 @@ import org.apache.spark.sql.expressions.UserDefinedFunction
 import org.apache.spark.sql.functions._
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.{DataFrame, SparkSession}
+import org.slf4j.LoggerFactory
 
 import scala.io.Source
 
@@ -40,6 +47,10 @@ object Columns {
   final val firstPerson = "first_person"
   final val thirdPerson = "third_person"
   final val filler = "fillers"
+  final val sentiment = "sentiment"
+  final val entities = "entities"
+  final val posTags = "pos_count"
+  final val detokenizedText = "detokenizedText"
   final val all = Array(
     textLength,
     wordsCount,
@@ -51,9 +62,9 @@ object Columns {
     //automatedReadabilityIndex
     smog
     , GunningFog
-    //, TFIDF
+    , TFIDF
     //,ColemanLiau
-    //, word2VecCol
+    , word2VecCol
     , exclamation
     , question
     , ellipsis
@@ -65,6 +76,9 @@ object Columns {
     //, firstPerson
     , thirdPerson
     //, filler
+    , sentiment
+    //, posTags
+    //,entities
   )
 }
 
@@ -88,17 +102,17 @@ object Formality extends App {
 
   def addLengthOfText(df: DataFrame) = {
     val findLength = udf { ColValue: String => ColValue.length }
-    df.withColumn(textLength, findLength(df("_c3")))
+    df.withColumn(textLength, findLength(df(detokenizedText)))
   }
 
   def addWordsCount(df: DataFrame) = {
     val wordsCountFunc = udf { ColValue: String => ColValue.split(" ").length }
-    df.withColumn(wordsCount, wordsCountFunc(df("_c3")))
+    df.withColumn(wordsCount, wordsCountFunc(df(detokenizedText)))
   }
 
   def countContraction(df: DataFrame): DataFrame = {
     val contractionsFunc = udf { ColValue: String => ColValue.count(_ == '\'') }
-    df.withColumn(contractions, contractionsFunc(df("_c3")))
+    df.withColumn(contractions, contractionsFunc(df(detokenizedText)))
   }
 
   def convertFormality(df: DataFrame) = {
@@ -185,7 +199,7 @@ object Formality extends App {
           - x.split(" ").filterNot(_ == "n't").count(isWord) + 1)
     }
     df
-      .withColumn(averageWordLength, averageWordLengthCount(df(text)))
+      .withColumn(averageWordLength, averageWordLengthCount(df(detokenizedText)))
   }
 
   def readabilityMetrics(df: DataFrame): DataFrame = {
@@ -261,11 +275,11 @@ object Formality extends App {
     }
 
     df
-      .withColumn(Flesch_Kincaid, FleschKincaidScore(df(text)))
-      .withColumn(smog, SMOGScore(df(text)))
-      .withColumn(automatedReadabilityIndex, automatedReadability(df(text)))
-      .withColumn(GunningFog, gunningFogFunc(df(text)))
-      .withColumn(ColemanLiau, ColemanLiauFunc(df(text)))
+      .withColumn(Flesch_Kincaid, FleschKincaidScore(df(detokenizedText)))
+      .withColumn(smog, SMOGScore(df(detokenizedText)))
+      .withColumn(automatedReadabilityIndex, automatedReadability(df(detokenizedText)))
+      .withColumn(GunningFog, gunningFogFunc(df(detokenizedText)))
+      .withColumn(ColemanLiau, ColemanLiauFunc(df(detokenizedText)))
   }
 
   def addTFIDF(df: DataFrame): DataFrame = {
@@ -279,6 +293,19 @@ object Formality extends App {
     val idfModel = idf.fit(featurizedData)
 
     idfModel.transform(featurizedData)
+  }
+
+  def sentimentAnalysis(df: DataFrame): DataFrame = {
+    val pipeline = PretrainedPipeline("analyze_sentiment_ml", "en")
+    val func = udf {
+      x: String => pipeline.annotate(x)("sentiment").head
+    }
+    val dataFrame = df.withColumn("sent", func(df(text)))
+    val indexer = new StringIndexer()
+      .setInputCol("sent")
+      .setOutputCol(sentiment)
+    val indexed = indexer.fit(dataFrame).transform(dataFrame)
+    indexed
   }
 
   def meanWord2Vec(df: DataFrame): DataFrame = {
@@ -295,18 +322,72 @@ object Formality extends App {
 
   def addCaseFeatures(df: DataFrame): DataFrame = {
     val entirelyCapitalisedWords = udf {
-      x: String => x.split(" ").count(word => word.forall(_.isUpper))
+      x: String => x.split(" ").count(word => word.forall(ch => ch.isUpper || !ch.isLetter))
     }
     val isLowerCaseFunc = udf {
-      x: String => if (x.split(" ").forall(_.forall(_.isLower))) 1 else 0
+      x: String => if (x.split(" ").forall(_.forall(ch => ch.isLower || !ch.isLetter))) 1 else 0
     }
     val isFirstLetterCapitalised = udf {
       x: String => if (x.dropWhile(!_.isLetter).headOption.getOrElse('l').isUpper) 1 else 0
     }
     df
-      .withColumn(capitalisedWords, entirelyCapitalisedWords(df("_c3")))
-      .withColumn(isLowerCase, isLowerCaseFunc(df("_c3")))
-      .withColumn(firstLetterCapitalised, isFirstLetterCapitalised(df("_c3")))
+      .withColumn(capitalisedWords, entirelyCapitalisedWords(df(detokenizedText)))
+      .withColumn(isLowerCase, isLowerCaseFunc(df(detokenizedText)))
+      .withColumn(firstLetterCapitalised, isFirstLetterCapitalised(df(detokenizedText)))
+  }
+
+  def posTagging(df: DataFrame): DataFrame = {
+    import com.johnsnowlabs.nlp.annotator._
+    val model = PerceptronModel.pretrained(name = "pos_anc", language = Some("en")).setInputCols(text).setOutputCol(posTags)
+    val tag = udf {
+      x: String =>
+        model.tag(Array(TokenizedSentence(x
+          .split(" ")
+          .zipWithIndex
+          .map(p => IndexedToken(p._1)), 0))).head.tags.groupBy(identity).mapValues(_.length).values.toSeq
+    }
+    val pp = PretrainedPipeline("pos_anc", "en")
+
+    val tagger = udf {
+      x: String => pp.annotate(x)
+    }
+
+    df
+      .withColumn(posTags, tagger(df(text)))
+  }
+
+  def detokenizeText(df: DataFrame): DataFrame = {
+    val detokenizer = udf {
+      x: String =>
+        var words = x.split(" ")
+        for (i <- words.indices) {
+          if (words(i) == "n't" || words(i) == "'s") words(i - 1) = words(i - 1) + words(i)
+          if (i > 1 && words(i) == "re" && words(i - 1) == "'") words(i - 2) = words(i - 2) + words(i - 1) + words(i)
+        }
+        words.mkString(" ")
+    }
+    df.
+      withColumn(detokenizedText, detokenizer(df(text)))
+  }
+
+  def namedEntities(df: DataFrame): DataFrame = {
+    /*val pipeline = PretrainedPipeline("ner_dl", "en")
+    val func = udf {
+      x: String => pipeline.annotate(x).head._2
+    }
+    */
+
+    val model = NerDLModel.pretrained().setInputCols(text).
+      setOutputCol("ner")
+    val dataFrame = model.transform(df)
+    val indexer = new StringIndexer()
+      .setInputCol("ner")
+      .setOutputCol(entities)
+    val indexed = indexer.fit(dataFrame).transform(dataFrame)
+    indexed.show(1)
+
+
+    indexed
   }
 
   def setFeatures(df: DataFrame): DataFrame = {
@@ -323,25 +404,29 @@ object Formality extends App {
     dataframe = countContraction(dataframe)
     dataframe = addWordsCount(dataframe)
     dataframe = addCaseFeatures(dataframe)
-    //dataframe = meanWord2Vec(dataframe)
+    dataframe = meanWord2Vec(dataframe)
     dataframe = readabilityMetrics(dataframe)
-    //dataframe = addTFIDF(dataframe)
+    dataframe = addTFIDF(dataframe)
     dataframe = punctuation(dataframe)
     dataframe = lexical(dataframe)
     dataframe = subjectivity(dataframe)
+    //dataframe = posTagging(dataframe)
+    dataframe = sentimentAnalysis(dataframe)
+    //dataframe = namedEntities(dataframe)
     dataframe
   }
 
   def readAndCleanDataset(dataFrame: DataFrame): DataFrame = {
     var df = dataFrame
     df = dropNotUsedColumns(df)
+    df = detokenizeText(df)
     df = extractFeatures(df)
     df = setFeatures(df)
     //df.show(29)
     df
   }
 
-  def trainModel(df: DataFrame):LinearRegressionModel = {
+  def trainModel(df: DataFrame): LinearRegressionModel = {
     val lr = new LinearRegression() setMaxIter 2000
     val Array(train, test) = df.randomSplit(Array(0.8, 0.2), 42)
     val lrModel: LinearRegressionModel = lr.fit(train)
@@ -361,13 +446,12 @@ object Formality extends App {
   case class Text(_c3: String)
 
   def transformText(str: String, spark: SparkSession) = {
-    import spark.implicits._
-    val schema = new StructType(Array[StructField](new StructField("_c3", new ArrayType(DataTypes.StringType, true), false, Metadata.empty)))
-    val fw = new FileWriter("_с3")
-    fw.write(text)
-    fw.flush()
-    fw.close()
-    spark.sparkContext.textFile(text).map(Text).toDF("_c3")
+    val schema = new StructType(Array[StructField](new StructField("_c3", DataTypes.StringType, false, Metadata.empty)))
+    //val fw = new FileWriter("./src/main/resources/text.txt")
+    //fw.write("_c3\n" + str)
+    //fw.flush()
+    //fw.close()
+    spark.read.format("csv").option("delimiter", "\t").schema(schema).load("file:///Users/oleksandry/coursework/src/main/resources/text")
   }
 
   def predict(text: String, linearRegressionModel: LinearRegressionModel, sparkSession: SparkSession) = {
@@ -378,14 +462,15 @@ object Formality extends App {
   }
 
   override def main(args: Array[String]): Unit = {
+    LoggerFactory.getLogger(org.slf4j.Logger.ROOT_LOGGER_NAME).asInstanceOf[Logger].setLevel(Level.ERROR)
     val conf = new SparkConf().setAppName(s"Formality").setMaster("local[*]").set("spark.executor.memory", "2g")
     val spark: SparkSession = SparkSession.builder().config(conf).getOrCreate()
     loadHedges("src/main/resources/hedge")
     loadFillers("src/main/resources/fillers")
-    val df =convertFormality(readAndCleanDataset(spark.read.format("csv").option("delimiter", "\t").load("src/main/resources/answers")))
+    val df = convertFormality(readAndCleanDataset(spark.read.format("csv").option("delimiter", "\t").load("src/main/resources/answers")))
     predict(df)
     val model = trainModel(df)
-    println(predict("I am the one who knocks", model, spark))
+    println(predict("The light sways back and forth and moves around on the horizon .", model, spark))
   }
 
 }
