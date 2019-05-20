@@ -1,13 +1,10 @@
 package com.coursework
 
 import java.io.FileWriter
-import java.util.Properties
+import java.util.Date
 
 import ch.qos.logback.classic.{Level, Logger}
-import com.johnsnowlabs.nlp.annotator.{NerDLModel, PerceptronApproach}
-import com.johnsnowlabs.nlp.annotators.common.{IndexedToken, TokenizedSentence}
 import com.johnsnowlabs.nlp.pretrained.PretrainedPipeline
-import edu.stanford.nlp.pipeline.StanfordCoreNLP
 import eu.crydee.syllablecounter.SyllableCounter
 import org.apache.spark.SparkConf
 import org.apache.spark.ml.evaluation.RegressionEvaluator
@@ -76,14 +73,16 @@ object Columns {
     //, firstPerson
     , thirdPerson
     //, filler
-    , sentiment
-    //, posTags
-    //,entities
+    //, sentiment
+    , posTags
+    ,entities
   )
 }
 
 
 object Formality extends App {
+
+  lazy val pp = PretrainedPipeline("explain_document_ml", language="en")
 
   import Columns._
 
@@ -337,23 +336,19 @@ object Formality extends App {
   }
 
   def posTagging(df: DataFrame): DataFrame = {
-    import com.johnsnowlabs.nlp.annotator._
-    val model = PerceptronModel.pretrained(name = "pos_anc", language = Some("en")).setInputCols(text).setOutputCol(posTags)
-    val tag = udf {
-      x: String =>
-        model.tag(Array(TokenizedSentence(x
-          .split(" ")
-          .zipWithIndex
-          .map(p => IndexedToken(p._1)), 0))).head.tags.groupBy(identity).mapValues(_.length).values.toSeq
-    }
-    val pp = PretrainedPipeline("pos_anc", "en")
-
     val tagger = udf {
-      x: String => pp.annotate(x)
+      x: String => pp.annotate(x)("pos")
     }
 
-    df
-      .withColumn(posTags, tagger(df(text)))
+    val dataFrame = df
+      .withColumn("_"+ posTags, tagger(df(text)))
+    val indexer = new CountVectorizer()
+      .setInputCol("_" + posTags)
+      .setOutputCol(posTags)
+      .setVocabSize(100)
+      .setMinDF(0)
+    val indexed = indexer.fit(dataFrame).transform(dataFrame)
+    indexed
   }
 
   def detokenizeText(df: DataFrame): DataFrame = {
@@ -371,22 +366,17 @@ object Formality extends App {
   }
 
   def namedEntities(df: DataFrame): DataFrame = {
-    /*val pipeline = PretrainedPipeline("ner_dl", "en")
-    val func = udf {
-      x: String => pipeline.annotate(x).head._2
+    val pipeline = PretrainedPipeline("entity_recognizer_dl")
+    val tagger = udf {
+      x: String => pipeline.annotate(x)("ner")
     }
-    */
-
-    val model = NerDLModel.pretrained().setInputCols(text).
-      setOutputCol("ner")
-    val dataFrame = model.transform(df)
-    val indexer = new StringIndexer()
-      .setInputCol("ner")
+    val dataFrame = df.withColumn("_"+ entities, tagger(df(text)))
+    val indexer = new CountVectorizer()
+      .setInputCol("_" + entities)
       .setOutputCol(entities)
+      .setVocabSize(100)
+      .setMinDF(0)
     val indexed = indexer.fit(dataFrame).transform(dataFrame)
-    indexed.show(1)
-
-
     indexed
   }
 
@@ -410,9 +400,9 @@ object Formality extends App {
     dataframe = punctuation(dataframe)
     dataframe = lexical(dataframe)
     dataframe = subjectivity(dataframe)
-    //dataframe = posTagging(dataframe)
-    dataframe = sentimentAnalysis(dataframe)
-    //dataframe = namedEntities(dataframe)
+    dataframe = posTagging(dataframe)
+    //dataframe = sentimentAnalysis(dataframe)
+    dataframe = namedEntities(dataframe)
     dataframe
   }
 
@@ -428,8 +418,7 @@ object Formality extends App {
 
   def trainModel(df: DataFrame): LinearRegressionModel = {
     val lr = new LinearRegression() setMaxIter 2000
-    val Array(train, test) = df.randomSplit(Array(0.8, 0.2), 42)
-    val lrModel: LinearRegressionModel = lr.fit(train)
+    val lrModel: LinearRegressionModel = lr.fit(df)
     lrModel
   }
 
@@ -447,10 +436,10 @@ object Formality extends App {
 
   def transformText(str: String, spark: SparkSession) = {
     val schema = new StructType(Array[StructField](new StructField("_c3", DataTypes.StringType, false, Metadata.empty)))
-    //val fw = new FileWriter("./src/main/resources/text.txt")
-    //fw.write("_c3\n" + str)
-    //fw.flush()
-    //fw.close()
+    val fw = new FileWriter("./src/main/resources/text")
+    fw.write("_c3\n" + str)
+    fw.flush()
+    fw.close()
     spark.read.format("csv").option("delimiter", "\t").schema(schema).load("file:///Users/oleksandry/coursework/src/main/resources/text")
   }
 
@@ -468,7 +457,10 @@ object Formality extends App {
     loadHedges("src/main/resources/hedge")
     loadFillers("src/main/resources/fillers")
     val df = convertFormality(readAndCleanDataset(spark.read.format("csv").option("delimiter", "\t").load("src/main/resources/answers")))
+    val timeStart = new Date().getTime
     predict(df)
+    val timeEnd = new Date().getTime
+    println((timeEnd - timeStart)/1000)
     val model = trainModel(df)
     println(predict("The light sways back and forth and moves around on the horizon .", model, spark))
   }
