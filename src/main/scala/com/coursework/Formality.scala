@@ -48,6 +48,8 @@ object Columns {
   final val entities = "entities"
   final val posTags = "pos_count"
   final val detokenizedText = "detokenizedText"
+  final val spellings = "spellings"
+  final val ngrams = "ngrams"
   final val all = Array(
     textLength,
     wordsCount,
@@ -73,16 +75,22 @@ object Columns {
     //, firstPerson
     , thirdPerson
     //, filler
-    //, sentiment
-    , posTags
-    ,entities
+    , sentiment
+    //, posTags
+    //, entities
+    , spellings
+    //, ngrams
+    //, "1_counts"
+    //, "2_counts"
+    //, "3_counts"
   )
 }
 
 
 object Formality extends App {
 
-  lazy val pp = PretrainedPipeline("explain_document_ml", language="en")
+  def pp = PretrainedPipeline("explain_document_ml", language = "en")
+  var ngramModel: IndexedSeq[NGram] = null
 
   import Columns._
 
@@ -204,20 +212,20 @@ object Formality extends App {
   def readabilityMetrics(df: DataFrame): DataFrame = {
     val FleschKincaidScore = udf {
       x: String => {
-        val words = x.split(" ")
+        val words = x.split(" ").filter(_.length == 0)
         //.filter(isWord).filter(_.length>=1)
         val wordCount = words.length
         val syllableCounter = new SyllableCounter()
-        val syllablesPerWord = words.map(syllableCounter.count)
+        val syllablesPerWord = words.map(w => if(w.length > 0) syllableCounter.count(w) else 0)
         val syllablesCount = syllablesPerWord.sum
-        206.835 - 1.015 * wordCount - 84.6 * syllablesCount / wordCount
+        206.835 - 1.015 * wordCount - 84.6 * syllablesCount / (if (wordCount!=0) wordCount else 1)
       }
     }
     val SMOGScore = udf {
       x: String => {
         val words = x.split(" ").filter(isWord).filter(_.length >= 1)
         val syllableCounter = new SyllableCounter()
-        val syllablesPerWord = words.map(syllableCounter.count)
+        val syllablesPerWord = words.map(w => if(w.length > 0) syllableCounter.count(w) else 0)
         val polysyllables = syllablesPerWord.count(_ >= 3)
         1.043 * Math.sqrt(polysyllables * 30) + 3.1291
       }
@@ -231,7 +239,7 @@ object Formality extends App {
         //.filter(isWord).filter(_.length>=1)
         val characters = words.map(_.count(_.isLetter)).sum
         val wordCount = words.length
-        4.71 * characters / wordCount + 0.5 * wordCount
+        4.71 * characters / (if (wordCount!=0) wordCount else 1) + 0.5 * wordCount
       }
     }
 
@@ -243,10 +251,10 @@ object Formality extends App {
         //.filter(isWord).filter(_.length>=1)
         val wordsTotal = words.length
         val syllableCounter = new SyllableCounter()
-        val syllablesPerWord = words.map(syllableCounter.count)
+        val syllablesPerWord = words.map(w => if(w.length > 0) syllableCounter.count(w) else 0)
         val polysyllables = syllablesPerWord.count(_ >= 3)
         try {
-          0.4 * (wordsTotal + 100 * polysyllables / wordsTotal)
+          0.4 * (wordsTotal + 100 * polysyllables / (if (wordsTotal!=0) wordsTotal else 1))
         }
         catch {
           case e =>
@@ -264,7 +272,7 @@ object Formality extends App {
         val characters = words.map(_.count(_.isLetter)).sum
         val wordCount = words.length
         try {
-          (5.89 * characters / wordCount) - (30 * 1 / wordCount) - 15.8
+          (5.89 * characters / (if (wordCount!=0) wordCount else 1)) - (30 * 1 / (if (wordCount!=0) wordCount else 1)) - 15.8
         }
         catch {
           case e =>
@@ -341,7 +349,7 @@ object Formality extends App {
     }
 
     val dataFrame = df
-      .withColumn("_"+ posTags, tagger(df(text)))
+      .withColumn("_" + posTags, tagger(df(text)))
     val indexer = new CountVectorizer()
       .setInputCol("_" + posTags)
       .setOutputCol(posTags)
@@ -365,12 +373,65 @@ object Formality extends App {
       withColumn(detokenizedText, detokenizer(df(text)))
   }
 
+  def buildNGrams(df: DataFrame): DataFrame = {
+   val func = udf {
+     x: String => pp.annotate(x)("token")
+   }
+
+    var dataFrame = df.withColumn("token", func(df(detokenizedText)))
+  if(ngramModel==null) ngramModel = (1 to 3).map(i =>
+      new NGram().setN(i)
+        .setInputCol("token").setOutputCol(s"${i}_grams")
+    )
+    ngramModel.foreach(n=> dataFrame = n.transform(dataFrame))
+    val vectorizers = (1 to 3).map(i =>
+      new CountVectorizer()
+        .setInputCol(s"${i}_grams")
+        .setOutputCol(s"${i}_counts")
+    )
+    vectorizers.foreach(n=> dataFrame = n.fit(dataFrame).transform(dataFrame))
+    /*val assembler = new VectorAssembler()
+      .setInputCols(vectorizers.map(_.getOutputCol).toArray)
+      .setOutputCol(ngrams)*/
+
+    //assembler.transform(dataFrame)
+    dataFrame
+  }
+
+  def tokenizeText(df: DataFrame): DataFrame = {
+    val tokenizer = udf {
+      x: String =>
+        val words = pp.annotate(x)("token")
+        words.mkString(" ")
+    }
+    df.
+      withColumn(text, tokenizer(df(detokenizedText)))
+  }
+
+  def countErrors(df: DataFrame): DataFrame = {
+    val func = udf {
+      x: String =>
+        val annotated = pp.annotate(x)
+        //println(annotated.keys.mkString(", "))
+        val spellings = annotated("checked")
+        val tokens = annotated("token")
+        var count = 0
+        for (i <- spellings.indices) {
+          if (spellings(i) != tokens(i)) count += 1
+        }
+        count
+    }
+
+    df
+      .withColumn(spellings, func(df(text)))
+  }
+
   def namedEntities(df: DataFrame): DataFrame = {
     val pipeline = PretrainedPipeline("entity_recognizer_dl")
     val tagger = udf {
       x: String => pipeline.annotate(x)("ner")
     }
-    val dataFrame = df.withColumn("_"+ entities, tagger(df(text)))
+    val dataFrame = df.withColumn("_" + entities, tagger(df(text)))
     val indexer = new CountVectorizer()
       .setInputCol("_" + entities)
       .setOutputCol(entities)
@@ -401,18 +462,21 @@ object Formality extends App {
     dataframe = lexical(dataframe)
     dataframe = subjectivity(dataframe)
     dataframe = posTagging(dataframe)
-    //dataframe = sentimentAnalysis(dataframe)
+    dataframe = sentimentAnalysis(dataframe)
     dataframe = namedEntities(dataframe)
+    dataframe = countErrors(dataframe)
+    //dataframe = buildNGrams(dataframe)
     dataframe
   }
 
-  def readAndCleanDataset(dataFrame: DataFrame): DataFrame = {
+  def readAndCleanDataset(dataFrame: DataFrame, isDatasetOrText: Boolean = true): DataFrame = {
     var df = dataFrame
     df = dropNotUsedColumns(df)
-    df = detokenizeText(df)
+    if (isDatasetOrText) df = detokenizeText(df) else df = tokenizeText(df)
     df = extractFeatures(df)
+    df = df.na.fill(0)
     df = setFeatures(df)
-    //df.show(29)
+    df.select("pos_count").show(5 )
     df
   }
 
@@ -422,47 +486,48 @@ object Formality extends App {
     lrModel
   }
 
-  def predict(df: DataFrame): Unit = {
+  def predictWithDf(df: DataFrame): LinearRegressionModel = {
     val lr = new LinearRegression() setMaxIter 2000
-    val Array(train, test) = df.randomSplit(Array(0.8, 0.2), 42)
+    val Array(train, test) = df.randomSplit(Array(0.9, 0.1), 42)
     val lrModel: LinearRegressionModel = lr.fit(train)
     println(lrModel.coefficients.toArray.zip(all).mkString("\n"))
     val lrPredictions = lrModel.transform(test)
     val r2Evaluator = new RegressionEvaluator().setMetricName("r2")
     println(r2Evaluator.evaluate(lrPredictions) * 100)
+    lrModel
   }
 
   case class Text(_c3: String)
 
   def transformText(str: String, spark: SparkSession) = {
-    val schema = new StructType(Array[StructField](new StructField("_c3", DataTypes.StringType, false, Metadata.empty)))
+    val schema = new StructType(Array[StructField](new StructField(detokenizedText, DataTypes.StringType, false, Metadata.empty)))
     val fw = new FileWriter("./src/main/resources/text")
-    fw.write("_c3\n" + str)
+    fw.write(s"$detokenizedText\n$str")
     fw.flush()
     fw.close()
     spark.read.format("csv").option("delimiter", "\t").schema(schema).load("file:///Users/oleksandry/coursework/src/main/resources/text")
   }
 
-  def predict(text: String, linearRegressionModel: LinearRegressionModel, sparkSession: SparkSession) = {
+  def predict(text: String, linearRegressionModel: LinearRegressionModel, sparkSession: SparkSession): Double = {
     var df = transformText(text, sparkSession)
-    df = readAndCleanDataset(df)
+    df = readAndCleanDataset(df, false)
     val res = linearRegressionModel.transform(df)
-    res.select("prediction").head().get(0)
+    res.explain
+    res.select("prediction").head().get(0).asInstanceOf[Double]
   }
 
   override def main(args: Array[String]): Unit = {
     LoggerFactory.getLogger(org.slf4j.Logger.ROOT_LOGGER_NAME).asInstanceOf[Logger].setLevel(Level.ERROR)
-    val conf = new SparkConf().setAppName(s"Formality").setMaster("local[*]").set("spark.executor.memory", "2g")
+    val conf = new SparkConf().setAppName(s"Formality").setMaster("local[*]").set("spark.executor.memory", "4g")
     val spark: SparkSession = SparkSession.builder().config(conf).getOrCreate()
     loadHedges("src/main/resources/hedge")
     loadFillers("src/main/resources/fillers")
-    val df = convertFormality(readAndCleanDataset(spark.read.format("csv").option("delimiter", "\t").load("src/main/resources/answers")))
+    val df = convertFormality(readAndCleanDataset(spark.read.format("csv").option("delimiter", "\t").load("src/main/resources/email", "src/main/resources/answers", "src/main/resources/blog")))
     val timeStart = new Date().getTime
-    predict(df)
+    val model = predictWithDf(df)
     val timeEnd = new Date().getTime
-    println((timeEnd - timeStart)/1000)
-    val model = trainModel(df)
-    println(predict("The light sways back and forth and moves around on the horizon .", model, spark))
+    println((timeEnd - timeStart) / 1000)
+    println(predict("The light sways back and forth and moves around on the horizon.", model, spark))
   }
 
 }

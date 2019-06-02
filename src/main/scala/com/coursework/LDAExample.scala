@@ -16,7 +16,7 @@ import scala.collection.JavaConversions._
 
 class LDAExample(sc: SparkContext, spark: SparkSession) {
 
-  def run(params: Params): Unit = {
+  def run(params: Params): Seq[String] = {
 
     Logger.getRootLogger.setLevel(Level.WARN)
 
@@ -75,15 +75,16 @@ class LDAExample(sc: SparkContext, spark: SparkSession) {
     val topics = topicIndices.map { case (terms, termWeights) =>
       terms.zip(termWeights).map { case (term, weight) => (vocabArray(term.toInt), weight) }
     }
-    println(s"${params.k} topics:")
+    /*println(s"${params.k} topics:")
     topics.zipWithIndex.foreach { case (topic, i) =>
       println(s"TOPIC $i")
       topic.foreach { case (term, weight) =>
         println(s"$term\t$weight")
       }
       println()
-    }
+    }*/
     sc.stop()
+    topics.flatten.toSeq.map(_._1).take(3)
   }
 
   /**
@@ -146,7 +147,7 @@ object LDAExample extends App {
     val spark = SparkSession.builder().config(conf).getOrCreate()
     val sc = spark.sparkContext
     val lda = new LDAExample(sc, spark)
-    val defaultParams = Params().copy(input = "src/main/resources/docs/")
+    val defaultParams = Params().copy(input = "src/main/resources/docs/test")
     lda.run(defaultParams)
   }
 
