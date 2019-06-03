@@ -5,13 +5,21 @@ import java.util.Date
 
 import ch.qos.logback.classic.{Level, Logger}
 import com.coursework.Formality._
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties
+import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.module.scala.DefaultScalaModule
+import com.fasterxml.jackson.module.scala.experimental.ScalaObjectMapper
 import org.apache.spark.SparkConf
 import org.apache.spark.ml.regression.LinearRegressionModel
 import org.apache.spark.sql.SparkSession
+import org.languagetool.JLanguageTool
+import org.languagetool.language.BritishEnglish
+import org.languagetool.rules.RuleMatch
 import org.slf4j.LoggerFactory
 import org.springframework.boot.SpringApplication
 import org.springframework.boot.autoconfigure.SpringBootApplication
 import org.springframework.context.annotation.Bean
+import scalaj.http.Http
 
 object MyServiceApplication {
   def main(args: Array[String]): Unit = {
@@ -41,6 +49,22 @@ case class LDAService() {
   }
 }
 
+@JsonIgnoreProperties(ignoreUnknown = true)
+case class Resp(matches: Array[RuleMatch])
+
+case class GrammarService(langTool: JLanguageTool = new JLanguageTool(new BritishEnglish())) {
+  import collection.JavaConverters._
+  val url = "http://localhost:8081/v2/check"
+  lazy val mapper = new ObjectMapper() with ScalaObjectMapper
+  mapper.registerModule(DefaultScalaModule)
+  def toJsonString(obj: Any): String = mapper.writerWithDefaultPrettyPrinter().writeValueAsString(obj)
+  def fromJsonString(s: String): Resp = mapper.readValue[Resp](s)
+  def annotateText(text: String): String = {
+    val resp = Http(url).params(Seq(("language","en-US"), ("text", text))).asString.body
+   resp.substring(resp.indexOf("\"matches")).dropRight(1).replaceAll("\\\"", "\"")
+  }
+}
+
 @SpringBootApplication
 class MyServiceApplication {
 
@@ -55,10 +79,27 @@ class MyServiceApplication {
     val timeStart = new Date().getTime
     val model = predictWithDf(df)
     FormalityService(model, spark)
+    //FormalityService(null, null)
   }
 
   @Bean
-  def ldaService(): LDAService = LDAService()
+  def ldaService(): LDAService = {
+    println("HEYYYYY")
+    val ldAService = LDAService()
+    println("!!!!!!!!")
+    ldAService
+  }
+
+  @Bean
+  def scoreService(LDAService: LDAService, formalityService: FormalityService, grammarService: GrammarService): ScoreService = {
+    new ScoreService(formalityService,LDAService, grammarService)
+  }
+
+  @Bean
+  def grammarService() = GrammarService()
+
+  @Bean
+  def appController(scoreService: ScoreService): AppController = new AppController(scoreService)
 
 
 }

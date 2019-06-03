@@ -83,7 +83,7 @@ class LDAExample(sc: SparkContext, spark: SparkSession) {
       }
       println()
     }*/
-    sc.stop()
+    //sc.stop()
     topics.flatten.toSeq.map(_._1).take(3)
   }
 
@@ -120,7 +120,7 @@ class LDAExample(sc: SparkContext, spark: SparkSession) {
     val tokenizer = new RegexTokenizer().setInputCol("docs").setOutputCol("rawTokens")
 
     //Removing the Stop-words using the Stop Words remover
-    val stopWordsRemover = new StopWordsRemover().setInputCol("rawTokens").setOutputCol("tokens")//.setLocale("en_US")
+    val stopWordsRemover = new StopWordsRemover().setInputCol("rawTokens").setOutputCol("tokens").setLocale("en_US")
     stopWordsRemover.setStopWords(stopWordsRemover.getStopWords ++ customizedStopWords)
 
     //Converting the Tokens into the CountVector

@@ -26,7 +26,9 @@ libraryDependencies ++= Seq("org.apache.spark" % "spark-core_2.11" % "2.4.0",
   "eu.crydee" % "syllable-counter" % "3.0.0",
   "org.springframework.boot" % "spring-boot-starter-web" % "1.5.4.RELEASE",
   "org.springframework.boot" % "spring-boot-configuration-processor" % "1.5.4.RELEASE",
-  "com.johnsnowlabs.nlp" %% "spark-nlp" % "2.0.4"
+  "com.johnsnowlabs.nlp" %% "spark-nlp" % "2.0.4",
+  "org.scalaj" %% "scalaj-http" % "2.4.1",
+  "com.fasterxml.jackson.module" % "jackson-module-scala_2.12" % "2.9.8"
 )
 
 excludeDependencies += "log4j" % "log4j_2.11"

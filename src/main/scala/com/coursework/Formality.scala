@@ -72,9 +72,9 @@ object Columns {
     //, averageWordLength
     //, digits
     , hedges
-    //, firstPerson
+    , firstPerson
     , thirdPerson
-    //, filler
+    , filler
     , sentiment
     //, posTags
     //, entities

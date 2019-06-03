@@ -1,16 +1,18 @@
 package com.coursework
 
 import org.springframework.stereotype.Controller
-import org.springframework.web.bind.annotation.{GetMapping, RequestMapping, RequestParam}
+import org.springframework.web.bind.annotation.{RequestMapping, RequestMethod, RequestParam, ResponseBody}
 
 
 @Controller
-@RequestMapping(Array("/coursework"))
 class AppController(scoreService: ScoreService) {
 
-  @GetMapping(Array("/scoreText"))
-  def scoreText(@RequestParam text: String): ScoreServiceResponse = {
-    scoreService.getScore(ScoreServiceRequest(text))
+  @RequestMapping(value =  Array("/scoreText"), method = Array(RequestMethod.GET))
+  @ResponseBody def scoreText(@RequestParam(value = "text", required = true) text: String): ScoreServiceResponse = {
+    println(text)
+    val resp = scoreService.getScore(ScoreServiceRequest(text))
+    println(resp)
+    resp
   }
 
 }
