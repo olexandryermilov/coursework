@@ -1,5 +1,6 @@
 package com.coursework
 
+import com.johnsnowlabs.nlp.annotator.NorvigSweetingModel
 import edu.stanford.nlp.process.Morphology
 import edu.stanford.nlp.simple.Document
 import org.apache.log4j.{Level, Logger}
@@ -48,7 +49,7 @@ class LDAExample(sc: SparkContext, spark: SparkSession) {
     }
 
     lda.setOptimizer(optimizer)
-      .setK(params.k)
+      .setK(Math.log(actualNumTokens).toInt + 1)
       .setMaxIterations(params.maxIterations)
       .setDocConcentration(params.docConcentration)
       .setTopicConcentration(params.topicConcentration)
@@ -84,7 +85,7 @@ class LDAExample(sc: SparkContext, spark: SparkSession) {
       println()
     }*/
     //sc.stop()
-    topics.flatten.toSeq.map(_._1).take(3)
+    topics.flatten.toSeq.map(_._1).take(Math.log(actualNumTokens).toInt + 1)
   }
 
   /**
@@ -125,9 +126,9 @@ class LDAExample(sc: SparkContext, spark: SparkSession) {
 
     //Converting the Tokens into the CountVector
     val countVectorizer = new CountVectorizer().setVocabSize(vocabSize).setInputCol("tokens").setOutputCol("features")
-
+    val spellings = NorvigSweetingModel.pretrained().setInputCols("tokens").setOutputCol("corrected")
     //Setting up the pipeline
-    val pipeline = new Pipeline().setStages(Array(tokenizer, stopWordsRemover, countVectorizer))
+    val pipeline = new Pipeline().setStages(Array(tokenizer, stopWordsRemover/*, spellings*/, countVectorizer))
 
     val model = pipeline.fit(df)
     val documents = model.transform(df).select("features").rdd.map {

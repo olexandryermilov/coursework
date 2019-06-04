@@ -212,7 +212,7 @@ object Formality extends App {
   def readabilityMetrics(df: DataFrame): DataFrame = {
     val FleschKincaidScore = udf {
       x: String => {
-        val words = x.split(" ").filter(_.length == 0)
+        val words = x.split(" ").filter(_.length != 0)
         //.filter(isWord).filter(_.length>=1)
         val wordCount = words.length
         val syllableCounter = new SyllableCounter()
