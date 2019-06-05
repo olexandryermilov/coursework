@@ -79,14 +79,11 @@ class MyServiceApplication {
     val timeStart = new Date().getTime
     val model = predictWithDf(df)
     FormalityService(model, spark)
-    //FormalityService(null, null)
   }
 
   @Bean
   def ldaService(): LDAService = {
-    println("HEYYYYY")
     val ldAService = LDAService()
-    println("!!!!!!!!")
     ldAService
   }
 
